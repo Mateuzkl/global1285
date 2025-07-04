@@ -74,16 +74,13 @@ void ProtocolGame::AddItem(NetworkMessage &msg, uint16_t id, uint8_t count)
 	{
 		msg.addByte(0x00);
 		msg.addByte(0x00); // quiver ammo count
-
-	} else if (it.classLevel > 0) {
-		msg.addByte(0x00); // item tier (0-10)
-	} else if (it.showClientCharges || it.showCharges) {
-		msg.add<uint32_t>(it.charges);
-		msg.addByte(0x00);
-	} else if (it.showClientDuration || it.showDuration) {
-		msg.add<uint32_t>(it.decayTime);
-		msg.addByte(0x00);
 	}
+	// workaround for protocol 12.9
+	else if (it.showClientCharges || it.showCharges || it.showClientDuration || it.showDuration) {
+		msg.add<uint32_t>(0); // charges/duration
+		msg.addByte(0); // unknown
+	}
+
 	if (version < 1200 && it.isAnimation) {
 		msg.addByte(0xFE); // random phase (0xFF for async)
 	}
@@ -123,16 +120,6 @@ void ProtocolGame::AddItem(NetworkMessage &msg, const Item *item)
 					lootFlags |= 1 << itt.first;
 				}
 			}
-			
-			// workaround - showCharges and showDuration will be removed from here once official otb drops
-			if (it.showClientCharges || it.showCharges) {
-				msg.add<uint32_t>(item->getCharges());
-				msg.addByte(0); // unknown
-			}
-			else if (it.showClientDuration || it.showDuration) {
-				msg.add<uint32_t>(item->getDuration() / 1000);
-				msg.addByte(0); // unknown
-			}
 
 			if (lootFlags != 0)
 			{
@@ -150,17 +137,24 @@ void ProtocolGame::AddItem(NetworkMessage &msg, const Item *item)
 		}
 
 		// Quiver ammo count
-    	if (item->getWeaponType() == WEAPON_QUIVER && player->getThing(CONST_SLOT_RIGHT) == item) {
-      		uint16_t ammoTotal = 0;
-      		for (Item* listItem : container->getItemList()) {
-        		ammoTotal += listItem->getItemCount();
-      		}
-      		msg.addByte(0x01);
-      		msg.add<uint32_t>(ammoTotal);
-    	}
-    	else
-      		msg.addByte(0x00);
+		if (container && item->getWeaponType() == WEAPON_QUIVER && player->getThing(CONST_SLOT_RIGHT) == item) {
+			uint16_t ammoTotal = 0;
+			for (Item* listItem : container->getItemList()) {
+				ammoTotal += listItem->getItemCount();
+			}
+			msg.addByte(0x01);
+			msg.add<uint32_t>(ammoTotal);
+		}
+		else {
+			msg.addByte(0x00);
+		}
 	}
+	// workaround for protocol 12.9
+	else if (it.showClientCharges || it.showCharges || it.showClientDuration || it.showDuration) {
+		msg.add<uint32_t>(0); // charges/duration
+		msg.addByte(0); // unknown
+	}
+
 	if (version < 1200 && it.isAnimation) {
 		msg.addByte(0xFE); // random phase (0xFF for async)
 	}
@@ -2999,8 +2993,11 @@ void ProtocolGame::sendReLoginWindow(uint8_t unfairFightReduction)
 	msg.addByte(0x28);
 	msg.addByte(0x00);
 	msg.addByte(unfairFightReduction);
-	if (version >= 1200)
+	if (version >= 1200) {
 		msg.addByte(0x00); // use death redemption (boolean)
+		msg.addByte(0x00); // has death redemption
+		msg.add<uint16_t>(0); // death redemption cost
+	}
 	writeToOutputBuffer(msg);
 }
 
@@ -3153,18 +3150,20 @@ void ProtocolGame::sendPreyData(PreySlotNum_t slot, PreyState_t slotState)
 	msg.addByte(0xE8);
 	msg.addByte(slot);
 
-	if (version >= 1200)
-		msg.addByte(slotState);
-	else
-		msg.addByte(0x00);
-	msg.addByte(0x00); // empty byte
-	if (version >= 1200)
-		msg.add<uint32_t>(0); // next free roll
-	else
-		msg.add<uint16_t>(0);
-
 	if (version >= 1200) {
+		msg.addByte(slotState);
+		msg.addByte(0x00); // empty byte
+		msg.add<uint32_t>(0); // next free roll
 		msg.addByte(0x00); // wildCards
+		msg.add<uint16_t>(0); // monster list size
+		msg.addByte(0x00); // bonus type
+		msg.add<uint16_t>(0); // bonus value
+		msg.addByte(0x00); // bonus grade
+		msg.add<uint16_t>(0); // unused
+	} else {
+		msg.addByte(0x00);
+		msg.addByte(0x00); // empty byte
+		msg.add<uint16_t>(0);
 	}
 
 	writeToOutputBuffer(msg);
@@ -3346,8 +3345,12 @@ void ProtocolGame::sendContainer(uint8_t cid, const Container *container, bool h
 
 	msg.addByte(hasParent ? 0x01 : 0x00);
 
-	if (version >= 1200)
+	if (version >= 1200) {
 		msg.addByte(0x00); // To-do: Depot Find (boolean)
+		msg.addByte(0x00); // Quick-loot container
+		msg.addByte(0x00); // Quick-loot fallback
+		msg.addByte(0x00); // Has market data
+	}
 
 	msg.addByte(container->isUnlocked() ? 0x01 : 0x00);	   // Drag and drop
 	msg.addByte(container->hasPagination() ? 0x01 : 0x00); // Pagination
@@ -3405,6 +3408,8 @@ void ProtocolGame::sendLootContainers()
 	{
 		msg.addByte(it.first);
 		msg.add<uint16_t>(it.second->getClientID());
+		msg.addByte(0x00); // is using main container
+		msg.addByte(0x00); // has parent container
 	}
 
 	writeToOutputBuffer(msg);
@@ -4713,15 +4718,14 @@ void ProtocolGame::sendFightModes()
 
 void ProtocolGame::sendAddCreature(const Creature *creature, const Position &pos, int32_t stackpos, bool isLogin)
 {
-	if (!canSee(pos))
-	{
+	std::cout << "[ProtocolGame::sendAddCreature] Starting login sequence..." << std::endl;
+	
+	if (!canSee(pos)) {
 		return;
 	}
 
-	if (creature != player)
-	{
-		if (stackpos >= 10)
-		{
+	if (creature != player) {
+		if (stackpos >= 10) {
 			return;
 		}
 
@@ -4736,20 +4740,15 @@ void ProtocolGame::sendAddCreature(const Creature *creature, const Position &pos
 		AddCreature(msg, creature, known, removedKnown);
 		writeToOutputBuffer(msg);
 
-		if (isLogin)
-		{
-			if (const Player *creaturePlayer = creature->getPlayer())
-			{
+		if (isLogin) {
+			if (const Player *creaturePlayer = creature->getPlayer()) {
 				if (!creaturePlayer->isAccessPlayer() ||
 					creaturePlayer->getAccountType() == account::ACCOUNT_TYPE_NORMAL)
 					sendMagicEffect(pos, CONST_ME_TELEPORT);
-			}
-			else
-			{
+			} else {
 				sendMagicEffect(pos, CONST_ME_TELEPORT);
 			}
 		}
-
 		return;
 	}
 
@@ -4764,12 +4763,9 @@ void ProtocolGame::sendAddCreature(const Creature *creature, const Position &pos
 	msg.addDouble(Creature::speedC, 3);
 
 	// can report bugs?
-	if (player->getAccountType() >= account::ACCOUNT_TYPE_NORMAL)
-	{
+	if (player->getAccountType() >= account::ACCOUNT_TYPE_NORMAL) {
 		msg.addByte(0x01);
-	}
-	else
-	{
+	} else {
 		msg.addByte(0x00);
 	}
 
@@ -4781,112 +4777,113 @@ void ProtocolGame::sendAddCreature(const Creature *creature, const Position &pos
 
 	if (version >= 1200) {
 		msg.addByte(shouldAddExivaRestrictions ? 0x01 : 0x00); // exiva button enabled
-	}
-
-	if (version >= 1200) {
 		msg.addByte(0x00); // tournament button enabled
 	}
 
 	writeToOutputBuffer(msg);
 
-	if (version >= 1200)
+	if (version >= 1200) {
+		// Ordem correta dos pacotes para client 12.91
 		sendTibiaTime(g_game.getLightHour());
-	sendPendingStateEntered();
-	sendEnterWorld();
-	sendMapDescription(pos);
-	loggedIn = true;
+		sendPendingStateEntered();
+		sendEnterWorld();
+		sendMapDescription(pos);
 
-	if (isLogin)
-	{
-		sendMagicEffect(pos, CONST_ME_TELEPORT);
-	}
-
-	for (int i = CONST_SLOT_FIRST; i <= CONST_SLOT_LAST; ++i)
-	{
-		sendInventoryItem(static_cast<slots_t>(i), player->getInventoryItem(static_cast<slots_t>(i)));
-	}
-
-	sendStats();
-	sendSkills();
-	sendBlessStatus();
-
-	sendPremiumTrigger();
-	sendStoreHighlight();
-
-	if (version >= 1200) {
-		sendItemsPrice();
-	}
-
-	//gameworld light-settings
-	sendWorldLight(g_game.getWorldLightInfo());
-
-	//player light level
-	sendCreatureLight(creature);
-
-	const std::forward_list<VIPEntry> &vipEntries = IOLoginData::getVIPEntries(player->getAccount());
-
-	if (player->isAccessPlayer())
-	{
-		for (const VIPEntry &entry : vipEntries)
-		{
-			VipStatus_t vipStatus;
-
-			Player *vipPlayer = g_game.getPlayerByGUID(entry.guid);
-			if (!vipPlayer)
-			{
-				vipStatus = VIPSTATUS_OFFLINE;
+		if (isLogin) {
+			std::cout << "[Login] Starting login sequence..." << std::endl;
+			
+			// 1. Basic info
+			std::cout << "[Login] Sending basic data..." << std::endl;
+			sendBasicData();
+			
+			// 2. Store & Premium
+			std::cout << "[Login] Sending store and premium data..." << std::endl;
+			sendStoreHighlight();
+			sendPremiumTrigger();
+			
+			// 3. Inventory & Containers
+			std::cout << "[Login] Sending inventory data..." << std::endl;
+			for (int i = CONST_SLOT_FIRST; i <= CONST_SLOT_LAST; ++i) {
+				sendInventoryItem(static_cast<slots_t>(i), player->getInventoryItem(static_cast<slots_t>(i)));
 			}
-			else
-			{
-				vipStatus = VIPSTATUS_ONLINE;
+			sendInventoryClientIds();
+			
+			// 4. Store & Coins
+			std::cout << "[Login] Sending store prices and coin balance..." << std::endl;
+			sendItemsPrice();
+			sendCoinBalance();
+			
+			// 5. Prey & Loot
+			std::cout << "[Login] Sending prey and loot data..." << std::endl;
+			initPreyData();
+			sendLootContainers();
+			
+			// 6. Game News & Icons
+			std::cout << "[Login] Sending news and icons..." << std::endl;
+			sendGameNews();
+			player->sendIcons();
+
+			// 7. Stats & Skills
+			std::cout << "[Login] Sending stats and skills..." << std::endl;
+			sendStats();
+			sendSkills();
+			
+			// 8. World Light
+			std::cout << "[Login] Sending world light..." << std::endl;
+			sendWorldLight(g_game.getWorldLightInfo());
+			sendCreatureLight(creature);
+			
+			// 9. VIP List
+			std::cout << "[Login] Sending VIP list..." << std::endl;
+			const std::forward_list<VIPEntry> &vipEntries = IOLoginData::getVIPEntries(player->getAccount());
+			for (const VIPEntry &entry : vipEntries) {
+				VipStatus_t vipStatus;
+				Player *vipPlayer = g_game.getPlayerByGUID(entry.guid);
+				if (!vipPlayer || vipPlayer->isInGhostMode()) {
+					vipStatus = VIPSTATUS_OFFLINE;
+				} else {
+					vipStatus = VIPSTATUS_ONLINE;
+				}
+				sendVIP(entry.guid, entry.name, entry.description, entry.icon, entry.notify, vipStatus);
 			}
 
-			sendVIP(entry.guid, entry.name, entry.description, entry.icon, entry.notify, vipStatus);
+			// 10. Client Check
+			std::cout << "[Login] Sending client check..." << std::endl;
+			player->sendClientCheck();
+			
+			// 11. Login Effect
+			std::cout << "[Login] Sending login effect..." << std::endl;
+			sendMagicEffect(pos, CONST_ME_TELEPORT);
+			
+			std::cout << "[Login] Login sequence completed." << std::endl;
 		}
-	}
-	else
-	{
-		for (const VIPEntry &entry : vipEntries)
-		{
-			VipStatus_t vipStatus;
-
-			Player *vipPlayer = g_game.getPlayerByGUID(entry.guid);
-			if (!vipPlayer || vipPlayer->isInGhostMode())
-			{
-				vipStatus = VIPSTATUS_OFFLINE;
-			}
-			else
-			{
-				vipStatus = VIPSTATUS_ONLINE;
-			}
-
-			sendVIP(entry.guid, entry.name, entry.description, entry.icon, entry.notify, vipStatus);
-		}
-	}
-
-	sendInventoryClientIds();
-	Item *slotItem = player->getInventoryItem(CONST_SLOT_BACKPACK);
-	if (slotItem)
-	{
-		Container *mainBackpack = slotItem->getContainer();
-		Container *hasQuickLootContainer = player->getLootContainer(OBJECTCATEGORY_DEFAULT);
-		if (mainBackpack && !hasQuickLootContainer)
-		{
-			player->setLootContainer(OBJECTCATEGORY_DEFAULT, mainBackpack);
+	} else {
+		sendPendingStateEntered();
+		sendEnterWorld();
+		sendMapDescription(pos);
+		
+		if (isLogin) {
+			sendInventoryItem(CONST_SLOT_HEAD, player->getInventoryItem(CONST_SLOT_HEAD));
+			sendInventoryItem(CONST_SLOT_NECKLACE, player->getInventoryItem(CONST_SLOT_NECKLACE));
 			sendInventoryItem(CONST_SLOT_BACKPACK, player->getInventoryItem(CONST_SLOT_BACKPACK));
+			sendInventoryItem(CONST_SLOT_ARMOR, player->getInventoryItem(CONST_SLOT_ARMOR));
+			sendInventoryItem(CONST_SLOT_RIGHT, player->getInventoryItem(CONST_SLOT_RIGHT));
+			sendInventoryItem(CONST_SLOT_LEFT, player->getInventoryItem(CONST_SLOT_LEFT));
+			sendInventoryItem(CONST_SLOT_LEGS, player->getInventoryItem(CONST_SLOT_LEGS));
+			sendInventoryItem(CONST_SLOT_FEET, player->getInventoryItem(CONST_SLOT_FEET));
+			sendInventoryItem(CONST_SLOT_RING, player->getInventoryItem(CONST_SLOT_RING));
+			sendInventoryItem(CONST_SLOT_AMMO, player->getInventoryItem(CONST_SLOT_AMMO));
+			
+			sendStats();
+			sendSkills();
+			
+			sendPremiumTrigger();
+			
+			sendMagicEffect(pos, CONST_ME_TELEPORT);
 		}
 	}
 
-	if (version >= 1200)
-		sendLootContainers();
-	sendBasicData();
-	initPreyData();
-
-	if (version >= 1200) {
-		player->sendClientCheck();
-		player->sendGameNews();
-	}
-	player->sendIcons();
+	loggedIn = true;
 }
 
 void ProtocolGame::sendMoveCreature(const Creature *creature, const Position &newPos, int32_t newStackPos, const Position &oldPos, int32_t oldStackPos, bool teleport)
